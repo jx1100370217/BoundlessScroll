@@ -1,0 +1,31 @@
+{
+  "width": 1088,
+  "height": 1920,
+  "fps": 24,
+  "steps": 8,
+  "native_audio": true,
+  "context_length": 5,
+  "seed": 172913,
+  "master_prompt": "A continuous still-life shot with a fixed camera, warm window light and quiet room acoustics.",
+  "groups": [
+    {
+      "frames": [
+        "frames/01.png",
+        "frames/02.png",
+        "frames/03.png"
+      ],
+      "segments": [
+        {
+          "id": "S001",
+          "num_frames": 56,
+          "prompt": "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark; Picture 2 (from Shot 1) aligns with the 2.29-second mark.\n\nintegrated_multimodal_description: [Shot 1] Start on the bead at the left. A lacquered red-orange bead rolls gently toward the center of a wooden ledge. Its highlight turns as it rolls. Match the centered bead and the unchanged dark green room in the last frame. Keep the camera locked.\n\noverall_soundscape: Quiet indoor room tone and a restrained wooden rolling sound that follows the movement.\n\nnon_diegetic_music: N/A"
+        },
+        {
+          "id": "S002",
+          "num_frames": 56,
+          "prompt": "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark; Picture 2 (from Shot 1) aligns with the 2.29-second mark.\n\nintegrated_multimodal_description: [Shot 1] The same red-orange bead continues smoothly from the center to the right along the same wooden ledge. Slow it naturally into the position in the last frame. Keep the lighting, room and camera fixed.\n\noverall_soundscape: Carry the indoor room tone across the join. The soft rolling sound fades as the bead comes to rest.\n\nnon_diegetic_music: N/A"
+        }
+      ]
+    }
+  ]
+}
