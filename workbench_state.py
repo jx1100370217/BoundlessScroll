@@ -201,7 +201,8 @@ def sequence_shots(project, config, timeline, queue, media):
         for segment_number, segment in enumerate(group.get("segments", []), 1):
             label = f"g{group_number:03}-s{segment_number:03}"
             segment_frames = segment["num_frames"]
-            count = segment_frames - min(config.get("context_length", 22), previous_frames)
+            trim = 0 if segment.get("cut_in") else min(config.get("context_length", 22), previous_frames)
+            count = segment_frames - trim
             previous_frames = segment_frames
             item = finished.get((group_number, segment_number), {})
             receipt_path = candidates.get(label)
@@ -218,10 +219,11 @@ def sequence_shots(project, config, timeline, queue, media):
             if video and (not video.is_file() or (config.get("check_native_shots")
                           and receipt.get("quality", {}).get("status") != "checked")):
                 video = None
+            keyframes = segment.get("keyframes", images[segment_number - 1:segment_number + 1])
             first, last = [
                 (project.manifest.parent / name).resolve() if isinstance(name, str) else None
-                for name in images[segment_number - 1:segment_number + 1]
-            ] if len(images) > segment_number else (None, None)
+                for name in keyframes
+            ] if len(keyframes) == 2 else (None, None)
             shots.append({
                 "id": segment.get("id", label), "label": label, "title": segment.get("title", f"机位 {group_number}"),
                 "frames": item.get("frames", count), "text": segment.get("speech_text") or segment.get("prompt", ""),

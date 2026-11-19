@@ -43,7 +43,7 @@ def prepare_cards(storyboard, timeline, time_jumps):
     seen = set()
     names = []
     for group, run in enumerate(storyboard["runs"], 1):
-        for actor in run["characters"]:
+        for actor in run.get("introductions", run["characters"]):
             if actor in seen or actor not in ROLES:
                 continue
             slot = next((entry for entry in by_group[group] if entry is not final_slot
@@ -88,6 +88,9 @@ def run(args):
         if not args.start <= number <= args.end:
             continue
         key = str(number)
+        if report["episodes"].get(key, {}).get("status") == "waiting_for_episode_2_approval":
+            print(f"Episode {number}: awaiting the user's approval of episode two", flush=True)
+            return
         title = f'第{number:02d}集_{episode["title"]}'
         base_dir = THERE / f"renders/ep{number:02d}"
         out = args.output / f"{title}_字幕审片版.mp4"
@@ -103,8 +106,8 @@ def run(args):
         except (DialogueMismatch, ShotRejected) as error:
             report["episodes"][key].update(status="needs_shot_review", error=str(error))
             save_json(state, report)
-            print(f"Episode {number}: retained existing takes for further shot review", flush=True)
-            continue
+            print(f"Episode {number}: waiting for shot review before starting the next episode", flush=True)
+            return
         timeline = load(base_dir / "timeline.json")
         verify_render_paths(base_dir, timeline)
         project = THERE / f"examples/ep{number:02d}"
@@ -116,7 +119,8 @@ def run(args):
         except CaptionPlacementError as error:
             report["episodes"][key].update(status="needs_card_placement", error=str(error))
             save_json(state, report)
-            continue
+            print(f"Episode {number}: waiting for caption placement before starting the next episode", flush=True)
+            return
         report["episodes"][key].update(status="needs_review", review=str(out))
         save_json(state, report)
 

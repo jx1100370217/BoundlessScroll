@@ -8,6 +8,9 @@ import subprocess
 from native_words import canonical, distance
 
 
+OCR_REVISION = 2
+
+
 class ShotRejected(ValueError):
     pass
 
@@ -70,7 +73,8 @@ def visible_words(video):
             value = "".join(re.sub(r"[^\u3400-\u9fff]", "", row["text"])
                             for row in csv.DictReader(io.StringIO(report), delimiter="\t")
                             if row["conf"] and float(row["conf"]) >= 45 and 16 <= int(row["height"]) <= 225)
-            if len(value) >= 2:
+            # Reflections on bowls and table edges often produce isolated straight strokes.
+            if len(set(value) - set("一二三人个了")) >= 2:
                 hits.append(value)
     finally:
         capture.release()

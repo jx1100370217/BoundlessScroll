@@ -23,7 +23,7 @@ def canonical(text):
         number = int(token.rstrip("%").replace(",", ""))
         return ("百分之" if token.endswith("%") else "") + chinese_integer(number)
 
-    text = unicodedata.normalize("NFKC", text)
+    text = unicodedata.normalize("NFKC", text).replace("哎呦", "哎哟")
     text = re.sub(r"[0-9]+(?:,[0-9]{3})*%?", spell_number, text)
     return "".join(char for char in text if char.isalnum())
 

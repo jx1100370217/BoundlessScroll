@@ -27,7 +27,7 @@ def assemble(episodes, script_file, output):
     total=0
     cues=[]
     sizes=[]
-    chapters=[';FFMETADATA1','title=嫌我装穷退婚？我转头娶走受气包养女']
+    chapters=[';FFMETADATA1','title=嫌我穷退婚？我转头娶走受气包养女']
     with tempfile.TemporaryDirectory(dir=output.parent,prefix='.assemble-') as scratch:
         tmp=Path(scratch)
         playlist=[]

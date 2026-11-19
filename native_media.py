@@ -10,22 +10,33 @@ class DialogueMismatch(ValueError):
         super().__init__(f"{shot}: native dialogue differs from the script: {recognized}")
 
 
-def join_native(clips, output):
+def join_native(clips, output, *, source_ranges=None):
     """Each input MP4 has already had both sides of the motion-context overlap removed."""
     from finish_episode import ffmpeg, probe
+    if source_ranges is None:
+        source_ranges = [(0, frames) for _, frames in clips]
+    ranges = list(zip(clips, source_ranges, strict=True))
+    edited = any(start or frames != available for (_, frames), (start, available) in ranges)
     with TemporaryDirectory(dir=output.parent, prefix='.native-join-') as temporary:
         work = Path(temporary)
         entries = []
         total = 0
         with (work/'stereo.pcm').open('wb') as pcm:
-            for i,(clip, frames) in enumerate(clips):
+            for i, ((clip, frames), (start, available)) in enumerate(ranges):
+                if not 0 <= start < start + frames <= available:
+                    raise ValueError(f'Invalid native picture and sound trim for {clip}')
                 video = work/f'{i:04}.mp4'
-                ffmpeg('-i',clip,'-map','0:v:0','-an','-c:v','copy',video)
+                encoding = ('-vf', f'trim=start_frame={start}:end_frame={start+frames},setpts=PTS-STARTPTS',
+                            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '13', '-pix_fmt', 'yuv420p',
+                            '-threads', '5') if edited else ('-c:v', 'copy')
+                ffmpeg('-i',clip,'-map','0:v:0','-an',*encoding,video)
                 sound = probe(clip,'a:0','channels')
                 if sound.get('channels')!=2:
                     raise ValueError(f'Missing native stereo audio at {clip}')
+                audio_trim = (f'aresample=48000,atrim=start_sample={start*2000},asetpts=PTS-STARTPTS,'
+                              f'apad,atrim=end_sample={frames*2000}')
                 subprocess.run(['ffmpeg','-nostdin','-v','error','-i',str(clip),'-map','0:a:0',
-                                '-af',f'aresample=48000,apad,atrim=end_sample={frames*2000}',
+                                '-af',audio_trim,
                                 '-f','s16le','-ac','2','pipe:1'], check=True,stdout=pcm)
                 entries.extend([f"file '{video.name}'",f'duration {frames/24:.9f}'])
                 total += frames
@@ -74,6 +85,9 @@ def finish_tracks(project, render, output):
             if distance(lazy_pinyin(canonical(text)),lazy_pinyin(canonical(recognized))):
                 raise DialogueMismatch(clip["id"], recognized)
             words=[dict(text=word.word,start=word.start,end=word.end) for s in transcription for word in s.words]
+        offset = slot.get('source_start_frame', 0) / 24
+        if offset:
+            words = [dict(word, start=max(0, word['start']-offset), end=word['end']-offset) for word in words]
         duration=slot['frames']/24;timing=character_times(text,words,duration)
         cues.extend(caption_cues(text,timing,slot['start_frame']/24,duration,1.))
     output.parent.mkdir(exist_ok=True,parents=True)

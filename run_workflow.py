@@ -30,6 +30,8 @@ def build_graph(cfg, segment, first, last, folder, index, seed, previous_folder)
                   prompt="\n".join(filter(None, [cfg.get("master_prompt"), segment["prompt"]])),
                   width=cfg["width"], height=cfg["height"], length=segment["num_frames"],
                   first_frame=["6", 0], last_frame=["7", 0])
+    if segment.get("open_tail"):
+        del anchor["inputs"]["last_frame"]
     graph = {
         "1": node("UNETLoader", unet_name=UNET, weight_dtype="default"),
         "2": node("CLIPLoader", clip_name=CLIP, type="minimax", device="default"),
@@ -41,7 +43,8 @@ def build_graph(cfg, segment, first, last, folder, index, seed, previous_folder)
         "7": node("LoadImage", image=last),
         "8": anchor,
         "9": node("MiniMaxH3MotionContext", conditioning=["8", 0], vae=["3", 0],
-                  latent=["8", 1], context_length=str(cfg.get("context_length", 22)),
+                  latent=["8", 1], context_length=str(5 if segment.get("open_tail") and not previous_folder
+                                                      else cfg.get("context_length", 22)),
                   audio_context_length=0),
         "10": node("RandomNoise", noise_seed=seed),
         "11": node("KSamplerSelect", sampler_name="euler"),
@@ -63,7 +66,7 @@ def build_graph(cfg, segment, first, last, folder, index, seed, previous_folder)
         graph["17"]["inputs"]["audio"] = ["16", 1]
         if segment.get("guide_audio"):
             graph["23"] = node("LoadAudio", audio=segment["guide_audio"])
-            start = cfg.get("context_length", 22) if index > 1 else 0
+            start = cfg.get("context_length", 22) if index > 1 and not segment.get("cut_in") else 0
             audio = ["23", 0]
             if start:
                 graph["25"] = node("TrimAudioDuration", audio=audio, start_index=start / 24,
@@ -72,6 +75,14 @@ def build_graph(cfg, segment, first, last, folder, index, seed, previous_folder)
             graph["24"] = node("MiniMaxH3AddGuide", positive=["8", 0], latent=["8", 1],
                                frame_idx=start, audio_vae=["21", 0], audio=audio)
             graph["9"]["inputs"]["conditioning"] = ["24", 0]
+    if anchor := segment.get("motion_anchor"):
+        graph["30"] = node("LoadImage", image=anchor["image"])
+        graph["29"] = node("MiniMaxH3AddGuide", positive=["8", 0], latent=["8", 1], vae=["3", 0],
+                           image=["30", 0], frame_idx=anchor["frame"])
+        if segment.get("guide_audio"):
+            graph["24"]["inputs"]["positive"] = ["29", 0]
+        else:
+            graph["9"]["inputs"]["conditioning"] = ["29", 0]
     if previous_folder:
         graph["19"] = node("MiniMaxH3MotionContextLoadLatent", latent_path=previous_folder,
                            clip_index=index - 1)
@@ -91,7 +102,9 @@ def reference_take(graph, segment):
     prompt = (
         "subject_definitions:\n<Picture 1> is the first composition and scene-identity reference. "
         "<Audio 1> carries the target voice and timing.\n\n"
-        "summary: Continue from the opening and closing guides as a single live-action scene.\n\n"
+        + ("summary: [keyframe completion + audio reference] Carry the action forward from the opening reference.\n\n"
+           if segment.get("open_tail") else
+           "summary: Continue from the opening and closing guides as a single live-action scene.\n\n") +
         "retention_analysis: Keep the positions, people, clothing and props of <Picture 1>. "
         "Follow the spoken performance in <Audio 1>.\n\n"
         f"detailed_description: {action.strip()} Heard aloud in the scene: <d>[Chinese] {speech}</d>\n\n"
@@ -107,9 +120,15 @@ def reference_take(graph, segment):
     graph["23"]["inputs"]["audio"] = audio
     graph["27"] = node("MiniMaxH3AddGuide", positive=["8", 0], latent=["8", 1], vae=["3", 0],
                        image=["6", 0], frame_idx=0)
-    graph["28"] = node("MiniMaxH3AddGuide", positive=["27", 0], latent=["8", 1], vae=["3", 0],
-                       image=["7", 0], frame_idx=-1)
-    graph["24"]["inputs"]["positive"] = ["28", 0]
+    guide = ["27", 0]
+    if not segment.get("open_tail"):
+        graph["28"] = node("MiniMaxH3AddGuide", positive=guide, latent=["8", 1], vae=["3", 0],
+                           image=["7", 0], frame_idx=-1)
+        guide = ["28", 0]
+    if "29" in graph:
+        graph["29"]["inputs"]["positive"] = guide
+        guide = ["29", 0]
+    graph["24"]["inputs"]["positive"] = guide
     return graph
 
 
@@ -251,9 +270,12 @@ def render_sequence(manifest, cfg, output, progress):
             count = seg["num_frames"]
             if not isinstance(count, int) or not 5 <= count <= 3600 or count % 17 != 5:
                 raise ValueError(f"Invalid 17n+5 sampling frame count: {count}")
-            if idx and count <= min(context, group["segments"][idx - 1]["num_frames"]):
+            if idx and not seg.get("cut_in") and count <= min(context, group["segments"][idx - 1]["num_frames"]):
                 raise ValueError("A continuation must include frames after its pinned head")
-        for name in group["frames"]:
+            if "keyframes" in seg and len(seg["keyframes"]) != 2:
+                raise ValueError("An alternate shot needs two keyframes")
+        keyframes = group["frames"] + [name for seg in group["segments"] for name in seg.get("keyframes", [])]
+        for name in keyframes:
             if name not in frames:
                 frames[name] = upload(session, (manifest.parent / name).resolve())
 
@@ -261,6 +283,8 @@ def render_sequence(manifest, cfg, output, progress):
     elapsed = 0
     timeline = []
     failures = []
+    shot_quality = []
+    crowd_regions = []
     group_start = 0
     for gid, group in enumerate(cfg["groups"], start=1):
         previous_folder = None
@@ -268,19 +292,26 @@ def render_sequence(manifest, cfg, output, progress):
         group_start += len(group["segments"])
         for idx, segment in enumerate(group["segments"], start=1):
             label = f"g{gid:03}-s{idx:03}"
+            if segment.get("cut_in"):
+                previous_folder = None
+            first, last = segment.get("keyframes", group["frames"][idx - 1:idx + 1])
             guide = segment.get("guide_audio")
             if guide:
                 if guide not in frames:
                     frames[guide] = upload(session, (manifest.parent / guide).resolve())
                 segment = dict(segment, guide_audio=frames[guide])
+            if anchor := segment.get("motion_anchor"):
+                image = anchor["image"]
+                if image not in frames:
+                    frames[image] = upload(session, (manifest.parent / image).resolve())
+                segment = dict(segment, motion_anchor=dict(anchor, image=frames[image]))
             base_seed = segment.get("seed", cfg.get("seed", 61025) + first_index + idx - 1)
             checked = cfg.get("check_native_shots")
             guided = checked and segment.get("speech_text") and segment.get("guide_audio")
             attempts = (2, 0, 1, 3) if guided else (0, 1, 2) if checked else (0,)
             candidates = []
             for attempt in attempts:
-                graph = build_graph(cfg, segment, frames[group["frames"][idx - 1]],
-                                    frames[group["frames"][idx]], "pending", idx,
+                graph = build_graph(cfg, segment, frames[first], frames[last], "pending", idx,
                                     base_seed + 200000 * attempt, previous_folder)
                 if guided and attempt >= 2:
                     graph = reference_take(graph, segment)
@@ -293,12 +324,17 @@ def render_sequence(manifest, cfg, output, progress):
                                                     idx < len(group["segments"]), progress)
                 if not checked:
                     break
-                from native_qa import inspect_take
+                from native_qa import OCR_REVISION, inspect_take
                 record = json.loads(receipt.read_text())
                 quality = record.get("quality")
-                if quality is None or quality["status"] == "checked" and not quality.get("gold_text_checked"):
+                stale_ocr = (quality and quality.get("visible_words")
+                             and quality.get("ocr_revision") != OCR_REVISION)
+                if quality is None or stale_ocr or (quality["status"] == "checked"
+                                                     and not quality.get("gold_text_checked")):
+                    if stale_ocr:
+                        record["previous_ocr_result"] = quality
                     quality = inspect_take(clip, segment.get("speech_text", ""))
-                    quality["gold_text_checked"] = True
+                    quality.update(gold_text_checked=True, ocr_revision=OCR_REVISION)
                     save_json(receipt, dict(record, quality=quality))
                 if quality["status"] == "checked":
                     break
@@ -309,8 +345,11 @@ def render_sequence(manifest, cfg, output, progress):
                 break
             previous_folder = folder
             count = frame_count(clip)
+            shot_quality.append(quality if checked else {})
+            crowd_regions.append(segment.get("crowd_regions", []))
             timeline.append({"group": gid, "segment": idx, "path": str(clip.relative_to(output)),
                              "prompt": segment["prompt"], "sampled_frames": segment["num_frames"],
+                             "continues": idx > 1 and not segment.get("cut_in"),
                              "frames": count, "start_frame": elapsed, "end_frame_exclusive": elapsed + count})
             elapsed += count
             print(f"{label}: {count} rendered frames after trim", flush=True)
@@ -320,12 +359,20 @@ def render_sequence(manifest, cfg, output, progress):
         raise ShotRejected("; ".join(failures))
 
     progress.update("assembling", current_shot=None)
+    source_ranges = None
+    if cfg.get("check_motion") and cfg.get("native_audio"):
+        from motion_qc import motion_edits
+        source_counts = [shot["frames"] for shot in timeline]
+        motion = motion_edits(timeline, output, shot_quality, crowd_regions)
+        source_ranges = [(shot["source_start_frame"], count) for shot, count in zip(timeline, source_counts)]
+        elapsed = motion["frames"]
+        save_json(output / "continuity_qc.json", motion)
     playlist = output / "concat.txt"
     playlist.write_text("".join(f"file '{row['path']}'\n" for row in timeline))
     tmp = output / "visual.partial.mp4"
     if cfg.get("native_audio"):
         from native_media import join_native
-        join_native([(output / row["path"],row["frames"]) for row in timeline], tmp)
+        join_native([(output / row["path"],row["frames"]) for row in timeline], tmp, source_ranges=source_ranges)
     else:
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "1",
                         "-i", str(playlist), "-map", "0:v:0", "-c:v", "copy", "-movflags",
