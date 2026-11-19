@@ -257,6 +257,12 @@ install -m 0644   "$SCROLL_HOME/pika-download/comfy/loras/pika_h3_flex_ref2va_co
 "$SCROLL_PYTHON" export_ui.py my-scene/project.json --output my-scene/workflow.json
 ```
 
+## 分集字幕和平台封面
+
+分集后期使用已完成的 1080p 成片作为底片。`package_episode.py` 从 `nameCards` 和 `timeCards` 读取名牌与时间字卡，按镜头标识、偏移和持续时间排版，保留对白字幕。时间字卡仅用于剧本明确的大幅时间跳跃，文案如「三年后」。脚本根据完整分集剧本判断剧终，在其他集的最后一个镜头以大号毛笔字单列竖排「未完待续」，并核对输出帧数及 H3 音频包。审片版应另存，画面和字幕经复核后再发布。
+
+`make_covers.py` 读取封面计划中的完整剧名、对应集数和素材路径，导出 1080×1440 与 1080×1920 两套封面。主标题留在两种规格的共同可见区。用第 4 步的 Python 安装 Pillow，字幕和封面使用参考项目的 `MaShanZheng.ttf` 与系统的 Noto Serif CJK SC 字体。
+
 ## 7. 交付前核对
 
 1. 查每镜回执和成片的宽高。竖屏交付 1080×1920，横屏交付 1920×1080。采样尺寸须达到对应交付尺寸。

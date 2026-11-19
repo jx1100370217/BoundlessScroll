@@ -150,6 +150,8 @@ def slot_state(receipt, video, queue, reviewed):
         return "running"
     if job in pending:
         return "queued"
+    if receipt.get("quality", {}).get("status") == "rejected":
+        return "failed"
     if receipt.get("error") or receipt.get("failed_job"):
         return "failed"
     if video:
@@ -213,7 +215,8 @@ def sequence_shots(project, config, timeline, queue, media):
                     receipt_path = None
             receipt = read_json(receipt_path, {}) if receipt_path else {}
             video = receipt_path.with_suffix(".mp4") if receipt.get("sha256") else None
-            if video and not video.is_file():
+            if video and (not video.is_file() or (config.get("check_native_shots")
+                          and receipt.get("quality", {}).get("status") != "checked")):
                 video = None
             first, last = [
                 (project.manifest.parent / name).resolve() if isinstance(name, str) else None

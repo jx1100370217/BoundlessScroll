@@ -4,12 +4,21 @@ import argparse
 import json
 import math
 import shutil
-from PIL import Image
+from PIL import Image, ImageOps
 
 from finish_episode import character_times
 
 FPS = 24
 CONTEXT = 5
+
+SPEAKERS = {
+    "顾承川": "the young man with the calm, warm voice", "陈莉": "the tablet-carrying secretary",
+    "林小满": "the young woman with a single braid", "林雪晴": "the daughter in the red dress",
+    "林国富": "the older stocky father", "王秀兰": "the older woman with short hair",
+    "张少": "the young man with a gold chain", "苏蔓": "the woman with the sleek bob",
+    "店长艾米": "the boutique manager", "鉴定师": "the elderly appraiser",
+    "亲戚甲": "the seated family guest", "保安队长": "the uniformed security lead",
+}
 
 def read(path):
     return json.loads(path.read_text(encoding='utf-8'))
@@ -18,24 +27,33 @@ def write(path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 def split_line(line, words):
-    length = line['duration']
-    count = max(1, math.ceil(length / 3.45))
-    ends = [0.]
-    for i in range(1, count):
-        ideal = ends[-1] + (length - ends[-1]) / (count - i + 1)
-        choices = []
-        for a, b in zip(words, words[1:]):
-            time = (a['end'] + b['start']) / 2
-            if abs(time - ideal) < .80 and time-ends[-1] <= 3.68 and length-time <= (count-i)*3.68:
-                pause = max(0., b['start'] - a['end'])
-                choices.append((abs(time-ideal) - min(pause, .4)*2, time))
-        for a, b in zip(line.get('parts',[]), line.get('parts',[])[1:]):
-            time = (a['end']+b['start'])/2
-            if abs(time-ideal)<.90 and time-ends[-1] <= 3.68 and length-time <= (count-i)*3.68:
-                choices.append((abs(time-ideal)-1, time))
-        ends.append(round(min(choices)[1] if choices else ideal, 6))
-    ends.append(length)
-    return [dict(id=line['id'], start=a, end=b) for a,b in zip(ends, ends[1:])]
+    # Use actual pauses at punctuation first, then divide only the remaining long clauses.
+    length = line["duration"]
+    timestamps = character_times(line["text"], words, length)
+    boundaries = [0.]
+    char_index = -1
+    for char in line["text"]:
+        if char.isalnum():
+            char_index += 1
+        if char not in "，。！？；、：,.!?;:" or not 0 <= char_index < len(timestamps) - 1:
+            continue
+        left, right = timestamps[char_index][1], timestamps[char_index + 1][0]
+        pause = (left + right) / 2
+        if pause - boundaries[-1] >= .8 and length - pause >= .65:
+            boundaries.append(pause)
+    boundaries.append(length)
+    word_ends = [(a["end"] + b["start"]) / 2 for a, b in zip(words, words[1:])]
+    cuts = [0.]
+    for start, end in zip(boundaries, boundaries[1:]):
+        count = math.ceil((end - start) / 3.68)
+        for remaining in range(count - 1, 0, -1):
+            ideal = cuts[-1] + (end - cuts[-1]) / (remaining + 1)
+            choices = [time for time in word_ends if abs(time - ideal) <= .65
+                       and .7 <= time - cuts[-1] <= 3.68 and end - time <= remaining * 3.68]
+            cuts.append(min(choices, key=lambda time: abs(time - ideal)) if choices else ideal)
+        cuts.append(end)
+    return [dict(id=line["id"], start=round(a, 6), end=round(b, 6)) for a, b in zip(cuts, cuts[1:])]
+
 
 def pack_parts(parts):
     chunks = []
@@ -118,7 +136,7 @@ def compile_episode(source, number, destination):
     frames=destination/'frames'
     frames.mkdir(parents=True,exist_ok=True)
     shutil.copytree(voice,destination/'voice',dirs_exist_ok=True)
-    write(destination/'storyboard.json', artwork)
+    image_preparation = []
     write(destination/'scene-script.json', episode)
     groups=[]
     for idx,run in enumerate(artwork['runs'],1):
@@ -126,17 +144,21 @@ def compile_episode(source, number, destination):
         files=[]
         for n,raw in enumerate(run['frames']):
             file=art_dir/Path(raw).name
-            with Image.open(file) as im:
-                im.verify()
             dest=frames/(f'{setup}-{n+1}.png')
-            shutil.copyfile(file,dest)
+            with Image.open(file) as im:
+                source_size = list(im.size)
+                ImageOps.fit(im.convert('RGB'), (2160, 3840),
+                             method=Image.Resampling.LANCZOS).save(dest)
+            image_preparation.append({'source': str(file), 'source_size': source_size,
+                                      'size': [2160, 3840], 'method': 'Lanczos'})
             files.append(dest)
         if len(files)!=2:
             raise ValueError(f'{setup}: expected two anchors for the camera setup')
-        parts=[]
-        for key in run['line_ids']:
-            parts.extend(split_line(by_id[key],asr[key]['words']))
-        chunks=pack_parts(parts)
+        if 'dialogue_chunks' in run:
+            chunks = run['dialogue_chunks']
+        else:
+            parts = [part for key in run['line_ids'] for part in split_line(by_id[key], asr[key]['words'])]
+            chunks = pack_parts(parts)
         chain=intermediate_frames(files,len(chunks),frames,setup)
         segs=[]
         for j,chunk in enumerate(chunks):
@@ -144,28 +166,34 @@ def compile_episode(source, number, destination):
             duration=max(2.7, speaking+.55) if chunk else 3.0
             count=5+17*math.ceil((FPS*duration+(CONTEXT if j else 0)-5)/17)
             end=(count-1)/FPS
-            speakers=[by_id[part['id']]['speaker'] for part in chunk]
-            spoken=('The spoken Mandarin follows the timed audio cue. In order, the speakers are '
-                    +' then '.join(speakers)+'. Their lips follow their own phrases.') if speakers else ''
+            phrases = [sentence_fragment(part, by_id[part['id']], asr[part['id']]['words']) for part in chunk]
+            speakers = [SPEAKERS.get(by_id[part["id"]]["speaker"], "the on-screen speaker")
+                        for part in chunk]
+            spoken = ("The timed acoustic cue is performed aloud in Mandarin exactly once, in this order: "
+                      + " then ".join(speakers)
+                      + ". Match the audible words and pauses. The active speaker moves their own lips "
+                      "and jaw naturally. Everyone else listens silently.") if speakers else ""
             action=run['action_en']
             if j and len(chunks)>1:
                 action+=' Continue the moment in the same space. Preserve actor positions and eyelines.'
             prompt=(f'How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the {end:.2f}-second mark of the target video.\n\n'
                     'integrated_multimodal_description: [Shot 1] '+action
                     +' Preserve the first and last framing. Natural breathing, purposeful hand movements and attentive reactions. '
-                    +spoken
+                    +spoken + ' A clean photographic image shows the performers, props and physical setting. '
                     +'\n\noverall_soundscape: Natural location sounds; clothing and footsteps are close, voices are distinct.\n\nnon_diegetic_music: N/A')
             shot_id=f'{setup}S{j+1:02d}'
             segment=dict(id=shot_id,prompt=prompt,num_frames=count,dialogue_parts=chunk)
             if chunk:
-                segment['speech_text']=''.join(sentence_fragment(part,by_id[part['id']],asr[part['id']]['words']) for part in chunk)
+                segment['speech_text'] = ''.join(phrases)
                 guide=Path('guides') / (shot_id+'.wav')
                 write_voice_guide(voice,by_id,chunk,count,j>0,destination/guide)
                 segment['guide_audio']=str(guide)
             segs.append(segment)
         groups.append({'frames':['frames/'+f for f in chain], 'segments':segs})
-    cfg=dict(native_audio=True,width=1088,height=1920,fps=FPS,steps=8,context_length=CONTEXT,seed=30000+100*number,
+    cfg=dict(native_audio=True,check_native_shots=True,width=1088,height=1920,fps=FPS,steps=8,context_length=CONTEXT,seed=30000+100*number,
              master_prompt='Photorealistic live-action contemporary Chinese vertical drama. Match the anchor faces, wardrobe and location. Keep the on-camera performers and spatial continuity consistent in a single uninterrupted shot. Preserve a clean photographic frame.',groups=groups)
+    artwork['frame_preparation'] = image_preparation
+    write(destination/'storyboard.json', artwork)
     write(destination/'project.json',cfg)
     print(f'{name}: {len(lines)} original lines, {len(groups)} camera setups, {sum(len(g["segments"]) for g in groups)} H3 segments', flush=True)
 

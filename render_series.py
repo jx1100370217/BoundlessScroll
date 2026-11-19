@@ -10,8 +10,9 @@ from pathlib import Path
 
 from build_episode import compile_episode
 from finish_episode import delivery_size, finish
+from native_media import DialogueMismatch
 from production_progress import track
-from run_workflow import run
+from run_workflow import run, save_json
 
 THERE=Path(__file__).resolve().parent
 MUSIC=('cold_distance','pressure','pressure','cold_distance','pressure','repair','truth','warm_home',
@@ -35,7 +36,33 @@ def validate(movie, timeline, lines):
     if chars(words)!=chars(expected):
         raise ValueError(f'Final captions differ from the script: {movie}')
 
-def render_series(source,episodes,start,end):
+def sample_episode(manifest, dest, music, output, dialogue_retries):
+    config = read(manifest)
+    shots = [shot for group in config.get("groups", []) for shot in group["segments"]]
+    book = dest / "dialogue-retakes.json"
+    attempts = read(book) if dialogue_retries and book.is_file() else {}
+    while True:
+        if attempts:
+            for index, shot in enumerate(shots):
+                count = attempts.get(shot["id"], 0)
+                if count:
+                    shot["seed"] = config["seed"] + index + 1000000 * count
+            save_json(manifest, config)
+        run(manifest, dest)
+        try:
+            finish(manifest, dest, music, output)
+        except DialogueMismatch as exc:
+            count = attempts.get(exc.shot, 0)
+            if count >= dialogue_retries:
+                raise
+            attempts[exc.shot] = count + 1
+            save_json(book, attempts)
+            print(f"Retake {exc.shot} ({count+1}/{dialogue_retries}): {exc}", flush=True)
+        else:
+            return
+
+
+def render_series(source,episodes,start,end,*,dialogue_retries=0):
     script=read(source/'script.json')['episodes']
     episodes.mkdir(parents=True,exist_ok=True)
     for ep in script[start-1:end]:
@@ -55,9 +82,9 @@ def render_series(source,episodes,start,end):
         lines=read(project/'voice/index.json')
         out=dest/(title+'.mp4')
         # Running the sampler checks every graph signature and completed clip before reusing it.
-        run((project/'project.json').resolve(),dest.resolve())
         music=THERE/'examples'/'music'/(MUSIC[number-1]+'.flac')
-        finish((project/'project.json').resolve(),dest.resolve(),music.resolve(),out.resolve())
+        sample_episode((project/'project.json').resolve(), dest.resolve(), music.resolve(),
+                       out.resolve(), dialogue_retries)
         config=read(project/'project.json')
         if config.get('native_episode'):
             report=read(project/config['native_episode']/'native-release.json')

@@ -4,6 +4,12 @@ from tempfile import TemporaryDirectory
 import json
 import subprocess
 
+class DialogueMismatch(ValueError):
+    def __init__(self, shot, recognized):
+        self.shot = shot
+        super().__init__(f"{shot}: native dialogue differs from the script: {recognized}")
+
+
 def join_native(clips, output):
     """Each input MP4 has already had both sides of the motion-context overlap removed."""
     from finish_episode import ffmpeg, probe
@@ -50,24 +56,32 @@ def finish_tracks(project, render, output):
     for clip,slot in zip(clips,timeline['segments']):
         text=clip.get('speech_text','')
         if not text:continue
-        if model is None:
-            model=WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo',device='cpu',compute_type='int8',cpu_threads=5)
-        raw=subprocess.check_output(['ffmpeg','-nostdin','-v','error','-i',str(render/slot['path']),
-                                     '-vn','-ar','16000','-ac','1','-f','f32le','pipe:1'])
-        y=np.frombuffer(raw,dtype=np.float32)
-        transcription=list(model.transcribe(y,language='zh',beam_size=5,temperature=0,
-                           word_timestamps=True,condition_on_previous_text=False)[0])
-        recognized=''.join(s.text for s in transcription)
-        if distance(lazy_pinyin(canonical(text)),lazy_pinyin(canonical(recognized))):
-            raise ValueError(f"{clip['id']}: verify the native performance against the script: {recognized}")
-        words=[dict(text=word.word,start=word.start,end=word.end) for s in transcription for word in s.words]
+        video_path = render / slot["path"]
+        receipt_path = video_path.with_suffix(".json")
+        receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
+        checked = receipt.get("quality", {})
+        if checked.get("status") == "checked" and checked.get("expected") == text:
+            words = checked["words"]
+        else:
+            if model is None:
+                model=WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo',device='cpu',
+                                   compute_type='int8',cpu_threads=5)
+            raw=subprocess.check_output(['ffmpeg','-nostdin','-v','error','-i',str(video_path),
+                                         '-vn','-ar','16000','-ac','1','-f','f32le','pipe:1'])
+            transcription=list(model.transcribe(np.frombuffer(raw,dtype=np.float32),language='zh',beam_size=5,
+                               temperature=0,word_timestamps=True,condition_on_previous_text=False)[0])
+            recognized=''.join(s.text for s in transcription)
+            if distance(lazy_pinyin(canonical(text)),lazy_pinyin(canonical(recognized))):
+                raise DialogueMismatch(clip["id"], recognized)
+            words=[dict(text=word.word,start=word.start,end=word.end) for s in transcription for word in s.words]
         duration=slot['frames']/24;timing=character_times(text,words,duration)
         cues.extend(caption_cues(text,timing,slot['start_frame']/24,duration,1.))
     output.parent.mkdir(exist_ok=True,parents=True)
     with TemporaryDirectory(dir=output.parent,prefix='.native-finish-') as temporary:
         tmp=Path(temporary)
         if cues:
-            captions(cues,tmp,w,h);vf+=',ass=captions.ass'
+            captions(cues, tmp, w, h, serif=project.get("check_native_shots", False))
+            vf += ",ass=captions.ass"
         ffmpeg('-i',source,'-map','0:v:0','-map','0:a:0','-vf',vf,'-c:v','libx264','-crf','15',
                '-preset','fast','-threads','5','-pix_fmt','yuv420p','-c:a','copy','-movflags','+faststart',tmp/'movie.mp4',cwd=tmp)
         vd=probe(tmp/'movie.mp4','v:0','width,height,nb_frames')

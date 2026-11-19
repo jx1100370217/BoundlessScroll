@@ -11,7 +11,7 @@ import time
 
 import requests
 
-from production_progress import track
+from production_progress import read_json, track
 
 
 BASE = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -81,6 +81,38 @@ def build_graph(cfg, segment, first, last, folder, index, seed, previous_folder)
     return graph
 
 
+def reference_take(graph, segment):
+    """Use the same anchor-plus-reference graph as the accepted hybrid takes."""
+    source = graph["8"]["inputs"]
+    audio = segment["guide_audio"]
+    speech = segment["speech_text"]
+    body = segment["prompt"].split("integrated_multimodal_description:", 1)[1]
+    action, soundscape = body.split("overall_soundscape:", 1)
+    prompt = (
+        "subject_definitions:\n<Picture 1> is the first composition and scene-identity reference. "
+        "<Audio 1> carries the target voice and timing.\n\n"
+        "summary: Continue from the opening and closing guides as a single live-action scene.\n\n"
+        "retention_analysis: Keep the positions, people, clothing and props of <Picture 1>. "
+        "Follow the spoken performance in <Audio 1>.\n\n"
+        f"detailed_description: {action.strip()} Heard aloud in the scene: <d>[Chinese] {speech}</d>\n\n"
+        f"overall_soundscape: {soundscape.strip()}"
+    )
+    graph["1"]["inputs"]["unet_name"] = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+    graph["4"]["inputs"].update(lora_name="pika_h3_flex_ref2va_comfy_bf16.safetensors", strength_model=1.0)
+    graph["12"]["inputs"]["steps"] = 6
+    graph["8"] = node("MiniMaxH3ReferenceToVideo", clip=["2", 0], vae=["3", 0], audio_vae=["21", 0],
+                      prompt=prompt, width=source["width"], height=source["height"],
+                      length=source["length"], ref_image_size="match",
+                      **{"ref_images.ref_image_0": ["6", 0], "ref_audios.ref_audio_0": ["23", 0]})
+    graph["23"]["inputs"]["audio"] = audio
+    graph["27"] = node("MiniMaxH3AddGuide", positive=["8", 0], latent=["8", 1], vae=["3", 0],
+                       image=["6", 0], frame_idx=0)
+    graph["28"] = node("MiniMaxH3AddGuide", positive=["27", 0], latent=["8", 1], vae=["3", 0],
+                       image=["7", 0], frame_idx=-1)
+    graph["24"]["inputs"]["positive"] = ["28", 0]
+    return graph
+
+
 def save_json(path, data):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -139,6 +171,65 @@ def run(manifest, output):
         render_sequence(manifest, cfg, output, progress)
 
 
+
+def take_key(graph, output):
+    # The key carries source image hashes and the previous clip's context chain.
+    signature = hashlib.sha256(json.dumps(graph, sort_keys=True).encode() + os.fsencode(output))
+    return signature.hexdigest()[:20]
+
+
+def reusable_take(graph, output, label):
+    receipt = output / "clips" / take_key(graph, output) / (label + ".json")
+    saved = read_json(receipt, {})
+    return ("pending_job" in saved or
+            (receipt.with_suffix(".mp4").is_file() and
+             saved.get("quality", {}).get("status") != "rejected"))
+
+
+def sample_clip(session, graph, output, label, index, needs_latent, progress):
+    key = take_key(graph, output)
+    folder = f"h3_multi_fl2va/{key}"
+    graph["18"]["inputs"]["filename_prefix"] = f"{folder}/shot{index:03}"
+    graph["20"]["inputs"]["filename_prefix"] = f"{folder}/clip"
+    clips = output / "clips" / key
+    clips.mkdir(parents=True, exist_ok=True)
+    clip = clips / (label + ".mp4")
+    receipt = clips / (label + ".json")
+    progress.select(label, receipt)
+    saved = json.loads(receipt.read_text()) if receipt.exists() else {}
+    ready = (clip.is_file() and saved.get("graph") == graph
+             and hashlib.sha256(clip.read_bytes()).hexdigest() == saved.get("sha256"))
+    if ready and needs_latent:
+        ready = response_json(session.post(BASE + "/h3_motion_context/slot_exists",
+                              json={"latent_path": folder, "clip_index": index},
+                              headers={"Origin": BASE}, timeout=30))["exists"]
+    if ready:
+        return clip, receipt, folder
+    job = saved.get("pending_job")
+    if not job:
+        job = response_json(session.post(BASE + "/prompt", json={"prompt": graph}, timeout=60))["prompt_id"]
+        save_json(receipt, {"pending_job": job, "graph": graph})
+    print(f"{label}: {job}", flush=True)
+    try:
+        info = get_result(session, job)
+    except RuntimeError as exc:
+        save_json(receipt, {"failed_job": job, "error": str(exc), "graph": graph})
+        raise
+    partial = clip.with_suffix(".part")
+    with session.get(BASE + "/view", params={k: info[k] for k in ("filename", "subfolder", "type")},
+                     stream=True, timeout=120) as response:
+        response.raise_for_status()
+        with partial.open("wb") as writer:
+            for chunk in response.iter_content(1024 * 1024):
+                writer.write(chunk)
+    count = frame_count(partial)
+    if count < 1:
+        raise RuntimeError(f"{label}: empty render")
+    partial.replace(clip)
+    save_json(receipt, {"job": job, "output": info, "frames": count, "graph": graph,
+                        "sha256": hashlib.sha256(clip.read_bytes()).hexdigest()})
+    return clip, receipt, folder
+
 def render_sequence(manifest, cfg, output, progress):
     context = cfg.get("context_length", 22)
     if cfg.get("fps", 24) != 24 or context not in (5, 22, 39, 56):
@@ -169,8 +260,12 @@ def render_sequence(manifest, cfg, output, progress):
     output.mkdir(parents=True, exist_ok=True)
     elapsed = 0
     timeline = []
+    failures = []
+    group_start = 0
     for gid, group in enumerate(cfg["groups"], start=1):
         previous_folder = None
+        first_index = group_start
+        group_start += len(group["segments"])
         for idx, segment in enumerate(group["segments"], start=1):
             label = f"g{gid:03}-s{idx:03}"
             guide = segment.get("guide_audio")
@@ -178,62 +273,51 @@ def render_sequence(manifest, cfg, output, progress):
                 if guide not in frames:
                     frames[guide] = upload(session, (manifest.parent / guide).resolve())
                 segment = dict(segment, guide_audio=frames[guide])
-            graph = build_graph(cfg, segment, frames[group["frames"][idx - 1]],
-                                frames[group["frames"][idx]], "pending", idx,
-                                cfg.get("seed", 61025) + len(timeline), previous_folder)
-            # Image names carry their content hash. The previous latent's folder carries
-            # the chain hash. Appending scenes therefore reuses exactly the matching prefix.
-            signature = hashlib.sha256(json.dumps(graph, sort_keys=True).encode() + os.fsencode(output))
-            key = signature.hexdigest()[:20]
-            folder = f"h3_multi_fl2va/{key}"
-            graph["18"]["inputs"]["filename_prefix"] = f"{folder}/shot{idx:03}"
-            graph["20"]["inputs"]["filename_prefix"] = f"{folder}/clip"
+            base_seed = segment.get("seed", cfg.get("seed", 61025) + first_index + idx - 1)
+            checked = cfg.get("check_native_shots")
+            guided = checked and segment.get("speech_text") and segment.get("guide_audio")
+            attempts = (2, 0, 1, 3) if guided else (0, 1, 2) if checked else (0,)
+            candidates = []
+            for attempt in attempts:
+                graph = build_graph(cfg, segment, frames[group["frames"][idx - 1]],
+                                    frames[group["frames"][idx]], "pending", idx,
+                                    base_seed + 200000 * attempt, previous_folder)
+                if guided and attempt >= 2:
+                    graph = reference_take(graph, segment)
+                candidates.append(graph)
+            if checked:
+                # Finish an in-flight job or reuse a checked take before sampling a new variant.
+                candidates.sort(key=lambda graph: not reusable_take(graph, output, label))
+            for attempt, graph in enumerate(candidates, start=1):
+                clip, receipt, folder = sample_clip(session, graph, output, label, idx,
+                                                    idx < len(group["segments"]), progress)
+                if not checked:
+                    break
+                from native_qa import inspect_take
+                record = json.loads(receipt.read_text())
+                quality = record.get("quality")
+                if quality is None or quality["status"] == "checked" and not quality.get("gold_text_checked"):
+                    quality = inspect_take(clip, segment.get("speech_text", ""))
+                    quality["gold_text_checked"] = True
+                    save_json(receipt, dict(record, quality=quality))
+                if quality["status"] == "checked":
+                    break
+                print(f'{label}: attempt {attempt} rejected: {quality["reason"]}', flush=True)
+            else:
+                failures.append(f'{label}: {quality["reason"]}')
+                # Later groups have independent anchors and can keep rendering.
+                break
             previous_folder = folder
-            clips = output / "clips" / key
-            clips.mkdir(parents=True, exist_ok=True)
-            clip = clips / (label + ".mp4")
-            receipt = clips / (label + ".json")
-            progress.select(label, receipt)
-            saved = json.loads(receipt.read_text()) if receipt.exists() else {}
-            ready = (clip.is_file() and saved.get("graph") == graph and
-                     hashlib.sha256(clip.read_bytes()).hexdigest() == saved.get("sha256"))
-            if ready and idx < len(group["segments"]):
-                ready = response_json(session.post(BASE + "/h3_motion_context/slot_exists",
-                                      json={"latent_path": folder, "clip_index": idx},
-                                      headers={"Origin": BASE}, timeout=30))["exists"]
-            if not ready:
-                job = None
-                if receipt.exists():
-                    job = json.loads(receipt.read_text()).get("pending_job")
-                if not job:
-                    job = response_json(session.post(BASE + "/prompt",
-                                        json={"prompt": graph}, timeout=60))["prompt_id"]
-                    save_json(receipt, {"pending_job": job, "graph": graph})
-                print(f"{label}: {job}", flush=True)
-                try:
-                    info = get_result(session, job)
-                except RuntimeError as exc:
-                    save_json(receipt, {"failed_job": job, "error": str(exc), "graph": graph})
-                    raise
-                partial = clip.with_suffix(".part")
-                with session.get(BASE + "/view", params={k: info[k] for k in
-                                 ("filename", "subfolder", "type")}, stream=True, timeout=120) as res:
-                    res.raise_for_status()
-                    with partial.open("wb") as stream:
-                        for chunk in res.iter_content(1024 * 1024):
-                            stream.write(chunk)
-                count = frame_count(partial)
-                if count < 1:
-                    raise RuntimeError(f"{label}: empty render")
-                partial.replace(clip)
-                save_json(receipt, {"job": job, "output": info, "frames": count, "graph": graph,
-                                    "sha256": hashlib.sha256(clip.read_bytes()).hexdigest()})
             count = frame_count(clip)
             timeline.append({"group": gid, "segment": idx, "path": str(clip.relative_to(output)),
                              "prompt": segment["prompt"], "sampled_frames": segment["num_frames"],
                              "frames": count, "start_frame": elapsed, "end_frame_exclusive": elapsed + count})
             elapsed += count
             print(f"{label}: {count} rendered frames after trim", flush=True)
+
+    if failures:
+        from native_qa import ShotRejected
+        raise ShotRejected("; ".join(failures))
 
     progress.update("assembling", current_shot=None)
     playlist = output / "concat.txt"

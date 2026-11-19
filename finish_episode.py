@@ -95,10 +95,12 @@ def clock(seconds, ass=False):
     return (f"{h}:{m:02}:{s:02}.{ms:02}" if ass else f"{h:02}:{m:02}:{s:02},{ms:03}")
 
 
-def captions(cues, folder, width, height):
+def captions(cues, folder, width, height, *, serif=False):
     size = max(14, round(min(width*.054, height*.08)))
     margin = round(height*.11)
     sides = round(width*.045)
+    font = "Noto Serif CJK SC" if serif else "Noto Sans CJK SC"
+    bold, outline, shadow = (0, 1, 2) if serif else (-1, max(1, round(size*.075)), 0)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -107,7 +109,7 @@ WrapStyle: 0
 ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Dialogue,Noto Sans CJK SC,{size},&H00FFFFFF,&H000000FF,&H00151515,&H88000000,-1,0,0,0,100,100,0,0,1,{max(1,round(size*.075))},0,2,{sides},{sides},{margin},1
+Style: Dialogue,{font},{size},&H00FFFFFF,&H000000FF,&H00151515,&H88000000,{bold},0,0,0,100,100,0,0,1,{outline},{shadow},2,{sides},{sides},{margin},1
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
