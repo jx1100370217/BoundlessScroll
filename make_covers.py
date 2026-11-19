@@ -1,25 +1,27 @@
-"""Compose episode covers with an exact title and a checked center 3:4 crop."""
+"""Compose a cover and accompanying publication caption for each episode."""
 import argparse
 import hashlib
 import json
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 WIDTH, HEIGHT = 1080, 1920
 CROP = (0, 240, 1080, 1680)
+DEFAULT_FONT = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
 
 
-def face(font, size, index=0):
-    return ImageFont.truetype(str(font), size, index=index)
+def face(path, size):
+    return ImageFont.truetype(str(path), size, index=2 if path.suffix.lower() == ".ttc" else 0)
 
 
-def fit_font(value, path, size, width, index=0):
-    while True:
-        font = face(path, size, index)
+def fit_font(value, path, size, width):
+    while size >= 24:
+        font = face(path, size)
         if font.getlength(value) <= width:
             return font
         size -= 2
+    raise ValueError("Split the cover title into shorter lines")
 
 
 def photograph(path, width, height, focus):
@@ -46,79 +48,101 @@ def background(row, root):
         picture.paste(second, (488, 0), mask)
     else:
         picture = photograph(paths[0], WIDTH, HEIGHT, focus[0])
-    tone = row.get("tone", "warm")
-    tint = {"warm": (42, 24, 12), "cool": (12, 20, 31), "wine": (47, 16, 25)}[tone]
-    ambient = Image.blend(picture.filter(ImageFilter.GaussianBlur(35)), Image.new("RGB", picture.size, tint), .82)
-    if row.get("portrait"):
-        # Keep the original faces in the lower part of the poster, clear of the title.
-        shift = row.get("shift", 520)
-        original = picture.crop((0, 260, WIDTH, HEIGHT))
-    else:
-        shift = row.get("shift", 340)
-        original = picture
-    blend = Image.new("L", original.size, 255)
-    blend.paste(Image.linear_gradient("L").resize((WIDTH, 190)), (0, 0))
-    ambient.paste(ImageEnhance.Contrast(original).enhance(1.03), (0, shift), blend)
-    shading = Image.new("L", (1, HEIGHT))
-    shading.putdata([round(190 * max(0, min(1, (690 - y) / 300))) for y in range(HEIGHT)])
-    ambient.paste(Image.new("RGB", ambient.size, (13, 11, 12)), (0, 0), shading.resize(ambient.size))
+    tint = {"warm": (21, 12, 17), "cool": (11, 15, 26), "wine": (29, 10, 19)}[row.get("tone", "warm")]
+    ambient = Image.blend(picture.filter(ImageFilter.GaussianBlur(40)), Image.new("RGB", picture.size, tint), .43)
+    top_blend = Image.new("L", picture.size, 255)
+    top_blend.paste(Image.linear_gradient("L").resize((WIDTH, 112)), (0, 0))
+    ambient.paste(picture, (0, row.get("picture_shift", 118)), top_blend)
+    shade = Image.new("L", (1, HEIGHT))
+    shade.putdata([round(241 * min(1, max(0, (y - 728) / 850)) ** .87) for y in range(HEIGHT)])
+    ambient.paste(tint, (0, 0), shade.resize(ambient.size))
     return ambient
 
 
-def letterpress(image, text, font, top, high, low, outline=3):
-    matte = Image.new("L", image.size)
-    draw = ImageDraw.Draw(matte)
-    l, t, r, b = draw.textbbox((0, 0), text, font=font)
-    point = ((WIDTH - (r - l)) // 2 - l, top - t)
-    draw.text(point, text, font=font, fill=255)
-    edge = Image.new("L", image.size)
-    ImageDraw.Draw(edge).text(point, text, font=font, fill=255, stroke_width=outline, stroke_fill=255)
-    shade = Image.new("L", image.size)
-    shade.paste(edge, (0, 7))
-    image.paste((8, 6, 8), (0, 0), shade.filter(ImageFilter.GaussianBlur(8)))
-    image.paste((44, 30, 23), (0, 0), edge)
-    ramp = Image.new("RGB", (1, HEIGHT))
-    for y in range(HEIGHT):
-        progress = min(1, max(0, (y - top) / max(1, b - t)))
-        ramp.putpixel((0, y), tuple(round(a + (z - a) * progress) for a, z in zip(high, low)))
-    image.paste(ramp.resize(image.size), (0, 0), matte)
+def headline(image, text, font, x, top, accent):
+    # Offset the upper strokes slightly to give the stacked headline a forward lean.
+    left, upper, right, bottom = font.getbbox(text)
+    h = bottom - upper + 24
+    slant = .12 if accent else .085
+    w = right - left + 24 + round(slant * h)
+
+    def lettering(stroke):
+        mask = Image.new("L", (w, h))
+        ImageDraw.Draw(mask).text((12 - left, 12 - upper), text, font=font, fill=255, stroke_width=stroke)
+        return mask.transform(mask.size, Image.Transform.AFFINE, (1, slant, -slant * h, 0, 1, 0),
+                              resample=Image.Resampling.BICUBIC)
+
+    face_mask = lettering(0)
+    edge = lettering(7)
+    point = (x - 12, top - 12)
+    image.paste((7, 5, 11), (point[0] + 4, point[1] + 9), edge.filter(ImageFilter.GaussianBlur(4)))
+    image.paste((30, 15, 19), point, edge)
+    if not accent:
+        image.paste((255, 247, 234), point, face_mask)
+        return (x, top, x + w - 12, top + h - 12)
+    shades = [(255, round(240 - 59 * (y / h)), round(170 - 100 * (y / h))) for y in range(h)]
+    gradient = Image.new("RGB", (1, h))
+    gradient.putdata(shades)
+    image.paste(gradient.resize((w, h)), point, face_mask)
+    return (x, top, x + w - 12, top + h - 12)
 
 
-def compose(row, root, title, episode, brush, serif):
+def compose(row, root, lines, episode, title_font, label_font):
     canvas = background(row, root)
-    first, punctuation, last = title.partition("？")
-    first += punctuation
-    if not punctuation and len(first) > 9:
-        middle = (len(first) + 1) // 2
-        first, last = first[:middle], first[middle:]
-    letterpress(canvas, first, fit_font(first, brush, 120, 904), 292 if last else 355,
-                (255, 239, 189), (210, 158, 90), 4)
-    if last:
-        letterpress(canvas, last, fit_font(last, serif, 82, 920, index=2), 433,
-                    (255, 246, 228), (225, 205, 174), 3)
+    # Title and number sit at the lower edge of the common 3:4 framing.
+    slots = ((84, 1054, 123, 876), (108, 1180, 132, 864), (77, 1311, 184, 925))
+    rectangles = []
+    for idx, (value, (x, top, size, max_width)) in enumerate(zip(lines, slots[-len(lines):])):
+        chosen = fit_font(value, title_font, size, max_width)
+        rectangles.append(headline(canvas, value, chosen, x, top, idx == len(lines) - 1))
     draw = ImageDraw.Draw(canvas)
     badge = f'第{episode["number"]}集'
-    badge_font = face(serif, 54, 2)
-    detail = episode["title"]
-    detail_font = fit_font(detail, serif, 35, 610, index=2)
-    bw = round(badge_font.getlength(badge))
-    tw = round(detail_font.getlength(detail))
-    left = (WIDTH - bw - tw - 69) // 2
-    draw.line((left, 573, left + 28, 573), fill=(200, 158, 101), width=2)
-    draw.text((left + 44, 574), badge, font=badge_font, fill=(255, 218, 141),
-              stroke_width=2, stroke_fill=(23, 15, 12), anchor="lm")
-    draw.text((left + bw + 69, 574), detail, font=detail_font,
-              fill=(243, 225, 195), stroke_width=1, stroke_fill=(23, 15, 12), anchor="lm")
+    font = face(label_font, 62)
+    left, top = 83, 1536
+    width = round(font.getlength(badge)) + 57
+    draw.rounded_rectangle((left, top, left + width, top + 88), radius=15,
+                           fill=(134, 26, 42), outline=(224, 145, 90), width=2)
+    draw.text((left + width / 2, top + 42), badge, font=font, fill=(255, 247, 231),
+              anchor="mm", stroke_width=1, stroke_fill=(134, 26, 42))
+    rectangles.append((left, top, left + width, top + 88))
+    if any(not (CROP[0] < a < c < CROP[2] and CROP[1] < b < d < CROP[3])
+           for a, b, c, d in rectangles):
+        raise ValueError(f"{badge} cover lettering fell outside the common crop")
     return canvas
+
+
+def title_lines(manifest):
+    title = manifest["title"]
+    first, punctuation, last = title.partition("？")
+    default = [first + punctuation, last] if last else [title]
+    if len(default) == 1 and len(title) > 10:
+        middle = (len(title) + 1) // 2
+        default = [title[:middle], title[middle:]]
+    lines = manifest.get("title_lines", default)
+    if not 1 <= len(lines) <= 3 or not all(lines) or "".join(lines) != title:
+        raise ValueError("Cover line breaks must preserve the full title")
+    return lines
+
+
+def save_release_copy(out, filename, title, label, copy, *, ai_generated):
+    folder = out / "发布文案"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / Path(filename).with_suffix(".txt").name
+    topics = " ".join("#" + topic for topic in copy["topics"])
+    parts = [f"《{title}》{label}", copy["hook"].strip()]
+    disclosure = "内容由AI生成\n" if ai_generated else ""
+    parts.append(disclosure + topics)
+    path.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+    return str(path.relative_to(out))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for key in ("script", "plan", "brush-font", "output"):
+    for key in ("script", "plan", "output"):
         parser.add_argument("--" + key, required=True, type=Path)
     parser.add_argument("--episode", type=int)
-    parser.add_argument("--serif-font", type=Path,
-                        default=Path("/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc"))
+    parser.add_argument("--title-font", "--brush-font", type=Path)
+    parser.add_argument("--label-font", "--serif-font", type=Path, default=DEFAULT_FONT)
     args = parser.parse_args()
     manifest = json.loads(args.plan.read_text(encoding="utf-8"))
     episodes = json.loads(args.script.read_text(encoding="utf-8"))["episodes"]
@@ -126,22 +150,31 @@ def main():
     out = args.output
     (out / "3x4").mkdir(parents=True, exist_ok=True)
     (out / "9x16").mkdir(parents=True, exist_ok=True)
+    lines = title_lines(manifest)
+    title_font = args.title_font or root / manifest.get("title_font", DEFAULT_FONT)
     receipts = []
     for episode in episodes:
         number = episode["number"]
         if args.episode and number != args.episode:
             continue
         row = manifest["episodes"][str(number)]
-        cover = compose(row, root, manifest["title"], episode, args.brush_font, args.serif_font)
+        cover = compose(row, root, lines, episode, title_font, args.label_font)
         image_name = f'第{number:02d}集_{episode["title"]}.jpg'
+
         def save(picture, folder):
             path = out / folder / image_name
             picture.save(path, quality=96, subsampling=0, optimize=True)
             return {"path": str(path.relative_to(out)), "size": list(picture.size),
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-        receipts.append({"episode": number, "title": manifest["title"], "label": f"第{number}集",
-                         "source_kind": row["source_kind"], "sources": row["images"],
-                         "cover_3x4": save(cover.crop(CROP), "3x4"), "cover_9x16": save(cover, "9x16")})
+
+        label = f"第{number}集"
+        receipt = {"episode": number, "title": manifest["title"], "title_lines": lines, "label": label,
+                   "source_kind": row["source_kind"], "sources": row["images"],
+                   "cover_3x4": save(cover.crop(CROP), "3x4"), "cover_9x16": save(cover, "9x16")}
+        if "release_copy" in row:
+            receipt["release_copy"] = save_release_copy(out, image_name, manifest["title"], label, row["release_copy"],
+                                                        ai_generated=manifest.get("ai_generated", False))
+        receipts.append(receipt)
     if not args.episode:
         (out / "封面清单.json").write_text(json.dumps(receipts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"{len(receipts)} episode covers exported to {out}")

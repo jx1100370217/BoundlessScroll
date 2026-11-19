@@ -257,11 +257,13 @@ install -m 0644   "$SCROLL_HOME/pika-download/comfy/loras/pika_h3_flex_ref2va_co
 "$SCROLL_PYTHON" export_ui.py my-scene/project.json --output my-scene/workflow.json
 ```
 
-## 分集字幕和平台封面
+## 分集字幕、平台封面与发布文案
 
 分集后期使用已完成的 1080p 成片作为底片。`package_episode.py` 从 `nameCards` 和 `timeCards` 读取名牌与时间字卡，按镜头标识、偏移和持续时间排版，保留对白字幕。时间字卡仅用于剧本明确的大幅时间跳跃，文案如「三年后」。脚本根据完整分集剧本判断剧终，在其他集的最后一个镜头以大号毛笔字单列竖排「未完待续」，并核对输出帧数及 H3 音频包。审片版应另存，画面和字幕经复核后再发布。
 
-`make_covers.py` 读取封面计划中的完整剧名、对应集数和素材路径，导出 1080×1440 与 1080×1920 两套封面。主标题留在两种规格的共同可见区。用第 4 步的 Python 安装 Pillow，字幕和封面使用参考项目的 `MaShanZheng.ttf` 与系统的 Noto Serif CJK SC 字体。
+`make_covers.py` 根据封面计划的剧名、分行和本集画面导出 1080×1440 与 1080×1920。完整标题与集数位于两种规格的共同安全区。可用 `--title-font` 或计划的 `title_font` 指定[思源黑体特黑](https://github.com/notofonts/noto-cjk/blob/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Black.otf)。用第 4 步的 Python 安装 Pillow。片中毛笔字沿用 `MaShanZheng.ttf`。
+
+封面计划中每集的 `release_copy` 写入 `hook` 和 `topics`。导出时在 `发布文案/` 同步保存 UTF-8 文本，包含完整剧名、集数、本集看点与话题。计划设置 `"ai_generated": true` 时，文案会带上「内容由AI生成」。
 
 ## 7. 交付前核对
 
