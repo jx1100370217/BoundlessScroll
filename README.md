@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="无垠长卷标志，一幅展开成无穷符号的中式手卷" width="250">
+  <img src="assets/logo.png" alt="青绿卷轴展开成无穷符号，卷中有山峦、朱日和云龙" width="250">
 </p>
 
 # 无垠长卷 · Boundless Scroll
