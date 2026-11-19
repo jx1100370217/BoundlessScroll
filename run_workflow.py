@@ -11,6 +11,8 @@ import time
 
 import requests
 
+from production_progress import track
+
 
 BASE = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
 UNET = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
@@ -129,8 +131,15 @@ def run(manifest, output):
     cfg = json.loads(manifest.read_text(encoding="utf-8"))
     if cfg.get("native_episode"):
         episode = manifest.parent / cfg["native_episode"]
-        subprocess.run([sys.executable, str(episode / "native_render.py"), str(episode / "shots.json")], check=True)
+        engine = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8189")
+        with track(manifest, output, "sampling", "sampled", engine=engine, fresh=True):
+            subprocess.run([sys.executable, str(episode / "native_render.py"), str(episode / "shots.json")], check=True)
         return
+    with track(manifest, output, "sampling", "assembled", engine=BASE, fresh=True) as progress:
+        render_sequence(manifest, cfg, output, progress)
+
+
+def render_sequence(manifest, cfg, output, progress):
     context = cfg.get("context_length", 22)
     if cfg.get("fps", 24) != 24 or context not in (5, 22, 39, 56):
         raise ValueError("H3 requires 24 fps and a motion context of 5, 22, 39 or 56 frames")
@@ -184,6 +193,7 @@ def run(manifest, output):
             clips.mkdir(parents=True, exist_ok=True)
             clip = clips / (label + ".mp4")
             receipt = clips / (label + ".json")
+            progress.select(label, receipt)
             saved = json.loads(receipt.read_text()) if receipt.exists() else {}
             ready = (clip.is_file() and saved.get("graph") == graph and
                      hashlib.sha256(clip.read_bytes()).hexdigest() == saved.get("sha256"))
@@ -225,6 +235,7 @@ def run(manifest, output):
             elapsed += count
             print(f"{label}: {count} rendered frames after trim", flush=True)
 
+    progress.update("assembling", current_shot=None)
     playlist = output / "concat.txt"
     playlist.write_text("".join(f"file '{row['path']}'\n" for row in timeline))
     tmp = output / "visual.partial.mp4"
@@ -251,5 +262,7 @@ if __name__ == "__main__":
     run(project, output)
     if not (project.parent / "voice" / "index.json").is_file():
         from finish_episode import export_picture
-        export_picture(output / "visual.mp4", output / "delivery_1080p.mp4")
-        print(output / "delivery_1080p.mp4")
+        delivery = output / "delivery_1080p.mp4"
+        with track(project, output, "exporting", "exported", delivery=delivery):
+            export_picture(output / "visual.mp4", delivery)
+        print(delivery)

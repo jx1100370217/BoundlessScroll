@@ -273,6 +273,12 @@ def export_picture(master, output):
 
 
 def finish(project_path, render, music, output):
+    from production_progress import track
+    with track(project_path, render, "exporting", "exported", delivery=output):
+        return finish_picture_and_sound(project_path, render, music, output)
+
+
+def finish_picture_and_sound(project_path, render, music, output):
     project=read(project_path)
     if project.get("native_episode"):
         from finish_native import master as finish_native_episode

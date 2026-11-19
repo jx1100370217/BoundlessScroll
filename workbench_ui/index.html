@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>制作工作台 · 无垠长卷</title>
+  <link rel="icon" href="/assets/logo.png">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="page-header">
+    <img class="brand-mark" src="/assets/logo.png" alt="" width="45" height="45">
+    <div class="project-heading">
+      <p class="brand-name">无垠长卷 · 制作工作台</p>
+      <h1 id="project-title">正在读取制作记录</h1>
+    </div>
+    <span class="project-meta" id="project-meta" hidden></span>
+    <div class="header-controls">
+      <label class="sr-only" for="episode">选择制作项目</label>
+      <select id="episode" disabled></select>
+      <button class="theme-button" id="theme" type="button" aria-label="切换至浅色主题" title="切换主题">☀</button>
+      <div class="connection">
+        <span class="status" id="status" role="status">正在连接</span>
+        <span class="engine" id="engine"></span>
+      </div>
+    </div>
+  </header>
+  <main>
+    <nav class="stages" aria-label="制作阶段">
+      <ol id="stages"></ol>
+    </nav>
+    <p class="offline" id="offline" role="alert" hidden>工作台连接中断，正在重试。</p>
+    <section class="history" aria-label="制作回放">
+      <span class="history-caption" id="history-caption">暂无制作记录</span>
+      <input type="range" id="history-slider" min="0" max="0" value="0" aria-label="浏览制作记录" disabled>
+      <button id="replay" type="button" disabled>▶ 重放本次制作</button>
+    </section>
+    <div class="layout" id="details" hidden>
+      <div class="production">
+        <section class="screenplay" id="screenplay" aria-label="剧本"></section>
+        <section id="storyboard" class="storyboard" aria-labelledby="storyboard-title">
+          <div class="section-bar">
+            <h2 id="storyboard-title">故事板</h2>
+            <span id="shot-count" class="meta"></span>
+          </div>
+          <div class="film-holder"><div class="film" id="film"></div></div>
+        </section>
+        <section id="renders" aria-labelledby="renders-title">
+          <div class="section-bar">
+            <h2 id="renders-title">渲染</h2>
+            <span id="render-info" class="meta"></span>
+          </div>
+          <div id="render-preview"></div>
+        </section>
+      </div>
+      <aside class="records" id="records" aria-labelledby="records-title">
+        <div class="section-bar">
+          <h2 id="records-title">制作记录</h2>
+          <span class="meta" id="updated"></span>
+        </div>
+        <div id="record-list" class="record-list"></div>
+      </aside>
+    </div>
+  </main>
+  <dialog id="detail-dialog" aria-labelledby="detail-title">
+    <div class="dialog-header">
+      <h2 id="detail-title"></h2>
+      <form method="dialog"><button type="submit">关闭</button></form>
+    </div>
+    <div id="detail-body"></div>
+  </dialog>
+</body>
+</html>

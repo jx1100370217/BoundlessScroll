@@ -10,6 +10,7 @@ from pathlib import Path
 
 from build_episode import compile_episode
 from finish_episode import delivery_size, finish
+from production_progress import track
 from run_workflow import run
 
 THERE=Path(__file__).resolve().parent
@@ -45,10 +46,12 @@ def render_series(source,episodes,start,end):
         dest=THERE/'renders'/folder
         ready=[source/'art'/folder/'index.json',source/'voice'/folder/'index.json',source/'voice'/folder/'asr.json']
         if number!=1:
-            while not all(p.is_file() for p in ready):
-                print(f'Waiting for {folder} assets',flush=True)
-                time.sleep(30)
-            compile_episode(source,number,project)
+            with track(project/'project.json',dest,'preparing','planned',fresh=True) as progress:
+                while not all(p.is_file() for p in ready):
+                    progress.update('waiting_assets')
+                    print(f'Waiting for {folder} assets',flush=True)
+                    time.sleep(30)
+                compile_episode(source,number,project)
         lines=read(project/'voice/index.json')
         out=dest/(title+'.mp4')
         # Running the sampler checks every graph signature and completed clip before reusing it.
@@ -61,11 +64,12 @@ def render_series(source,episodes,start,end):
             timeline=dict(total_frames=report['frames'],width=report['source_size'][0],height=report['source_size'][1])
         else:
             timeline=read(dest/'timeline.json')
-        validate(out,timeline,lines)
-        for item in [out,out.with_suffix('.srt')]:
-            tmp=episodes/(item.name + '.partial')
-            shutil.copyfile(item,tmp)
-            tmp.replace(episodes/item.name)
+        with track(project/'project.json',dest,'validating','exported',delivery=out):
+            validate(out,timeline,lines)
+            for item in [out,out.with_suffix('.srt')]:
+                tmp=episodes/(item.name + '.partial')
+                shutil.copyfile(item,tmp)
+                tmp.replace(episodes/item.name)
         print(f'EPISODE VERIFIED {number:02d} {title} {timeline["total_frames"]/24:.3f}s',flush=True)
 
 if __name__=='__main__':
